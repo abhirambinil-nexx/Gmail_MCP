@@ -5,11 +5,8 @@ import { oauth2Client } from "../config/google.js";
 export async function getAccessToken(email) {
   const cacheKey = `gmail:access:${email}`;
 
-  let accessToken = await redis.get(cacheKey);
-
-  if (accessToken) {
-    return accessToken;
-  }
+  const cached = await redis.get(cacheKey);
+  if (cached) return cached;
 
   const [rows] = await pool.query(
     `
@@ -21,7 +18,7 @@ export async function getAccessToken(email) {
   );
 
   if (!rows.length) {
-    throw new Error("Gmail account not connected");
+    throw new Error("Gmail account not connected. Please authenticate first.");
   }
 
   oauth2Client.setCredentials({
@@ -29,24 +26,20 @@ export async function getAccessToken(email) {
   });
 
   const { credentials } = await oauth2Client.refreshAccessToken();
+  const accessToken = credentials.access_token;
 
-  accessToken = credentials.access_token;
+  await redis.set(cacheKey, accessToken, { EX: 3500 });
 
-  // persist refreshed refresh_token to DB if available
-  try {
-    if (credentials.refresh_token) {
+  if (credentials.refresh_token) {
+    try {
       await pool.query(
         `UPDATE oauth_accounts SET refresh_token = ? WHERE email = ?`,
         [credentials.refresh_token, email],
       );
+    } catch (err) {
+      console.error("Failed to persist rotated refresh token:", err.message);
     }
-  } catch (err) {
-    console.error("Failed to persist refreshed tokens to DB:", err);
   }
-
-  await redis.set(cacheKey, accessToken, {
-    EX: 3500,
-  });
 
   return accessToken;
 }

@@ -1,52 +1,33 @@
-import pool from "../config/mysql.js";
 import redis from "../config/redis.js";
-import { oauth2Client } from "../config/google.js";
+import crypto from "crypto";
 
-export async function getAccessToken(email) {
-  let accessToken = await redis.get(`gmail:access:${email}`);
+// ─── Redis: OAuth state management ───────────────────────────────────────────
+// Stores a short-lived random state string in Redis to prevent CSRF attacks
+// during the OAuth login flow.
+//
+// Key:   "oauth:state:<state>"
+// Value: email or "pending"
+// TTL:   300 seconds (5 minutes — matches typical OAuth flow timeout)
+//
+// Usage:
+//   1. generateState()  — called in /auth/login, state stored in Redis
+//   2. verifyState()    — called in /auth/callback, validates & deletes state
 
-  if (accessToken) {
-    return accessToken;
+export async function generateState() {
+  const state = crypto.randomBytes(16).toString("hex");
+  await redis.set(`oauth:state:${state}`, "pending", { EX: 300 });
+  return state;
+}
+
+export async function verifyState(state) {
+  const key = `oauth:state:${state}`;
+  const value = await redis.get(key);
+
+  if (!value) {
+    throw new Error("Invalid or expired OAuth state. Please try logging in again.");
   }
 
-  const [rows] = await pool.query(
-    `
-    SELECT refresh_token
-    FROM oauth_accounts
-    WHERE email=?
-    `,
-    [email],
-  );
-
-  if (!rows.length) {
-    throw new Error("Gmail not connected");
-  }
-
-  const refreshToken = rows[0].refresh_token;
-
-  oauth2Client.setCredentials({
-    refresh_token: refreshToken,
-  });
-
-  const { credentials } = await oauth2Client.refreshAccessToken();
-
-  accessToken = credentials.access_token;
-
-  // Persist refreshed refresh_token to DB if provided
-  try {
-    if (credentials.refresh_token) {
-      await pool.query(
-        `UPDATE oauth_accounts SET refresh_token = ? WHERE email = ?`,
-        [credentials.refresh_token, email],
-      );
-    }
-  } catch (err) {
-    console.error("Failed to persist refreshed tokens to DB:", err);
-  }
-
-  await redis.set(`gmail:access:${email}`, accessToken, {
-    EX: 3500,
-  });
-
-  return accessToken;
+  // Delete after use — one-time token
+  await redis.del(key);
+  return true;
 }
